@@ -1,0 +1,73 @@
+# ==============================================================================
+# MV-SAM3D Docker Compose
+# Includes: API server, frontend, and Grounded-SAM-2 segmentation service
+# ==============================================================================
+services:
+  # ============================================================================
+  # MV-SAM3D API Server (FastAPI)
+  # ============================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - model-cache:/app/checkpoints
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - GROUNDED_SAM2_URL=http://grounded-sam2:8080
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - grounded-sam2
+    networks:
+      - mv-sam3d-net
+
+  # ============================================================================
+  # Frontend (served via the API container for simplicity)
+  # ============================================================================
+  frontend:
+    image: nginx:alpine
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+    networks:
+      - mv-sam3d-net
+
+  # ============================================================================
+  # Grounded-SAM-2 Segmentation Service
+  # Provides mask generation from text prompts
+  # ============================================================================
+  grounded-sam2:
+    image: ghcr.io/sustechrcvlab/grounded-sam-2:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - mv-sam3d-net
+
+volumes:
+  model-cache:
+
+networks:
+  mv-sam3d-net:
+    driver: bridge
