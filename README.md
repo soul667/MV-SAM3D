@@ -1,33 +1,46 @@
-# MV-SAM3D: Adaptive Multi-View 3D Reconstruction
+# MV-SAM3D
 
-An enhanced multi-view extension for [SAM 3D Objects](https://github.com/facebookresearch/sam-3d-objects), featuring **adaptive fusion** strategies for improved 3D reconstruction quality from multiple viewpoints.
+MV-SAM3D is a multi-view 3D reconstruction framework that extends SAM 3D Objects to leverage observations from multiple viewpoints. It supports both single-object and multi-object generation, and is designed to produce more stable geometry, texture, and scene-level consistency.
 
-> 🔗 **Basic Version**: For a simpler averaging-based approach, check out our [basic multi-view fork](https://github.com/devinli123/multi-view-sam-3d-objects).
+## Paper
 
-## 🔥 Highlights
+- arXiv: [https://arxiv.org/abs/2603.11633](https://arxiv.org/abs/2603.11633)
 
-- **Adaptive Multi-View Fusion**: Unlike simple averaging, we employ a confidence-aware fusion mechanism that automatically weighs contributions from different views based on their reliability.
+## Installation
 
-- **Multiple Weighting Strategies**: 
-  - **Entropy-based**: Uses attention entropy as uncertainty measure
-  - **Visibility-based**: Uses self-occlusion detection via DDA ray tracing
-  - **Mixed**: Combines both strategies for robust weighting
+Please follow the environment setup from:
 
-- **Per-Latent Weighting**: Our method operates at the latent level, enabling fine-grained control over how information from different views is combined for each spatial location.
+- [SAM 3D Objects](https://github.com/facebookresearch/sam-3d-objects)
+- [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3)
 
-- **Improved Reconstruction Quality**: Better handling of occluded regions and view-dependent artifacts through intelligent fusion.
+## Data Format
 
-## 📢 Research in Progress
+```text
+scene/
+├── images/
+│   ├── 0.png
+│   ├── 1.png
+│   └── ...
+├── object_a/
+│   ├── 0.png
+│   ├── 1.png
+│   └── ...
+├── object_b/
+│   └── ...
+└── ...
+```
 
-This is an **active research project**. We are continuously exploring new fusion strategies and will release updates as our research progresses.
+Mask files are RGBA PNG where alpha indicates foreground.
 
 ## Results Comparison
+
+### Single-object
 
 <table>
 <tr>
   <td align="center" width="33%"><b>Single-View (View 3)</b></td>
   <td align="center" width="33%"><b>Single-View (View 6)</b></td>
-  <td align="center" width="33%"><b>Multi-View (Adaptive Fusion)</b></td>
+  <td align="center" width="33%"><b>MV-SAM3D</b></td>
 </tr>
 <tr>
   <td align="center" width="33%" style="padding: 5px;">
@@ -41,18 +54,18 @@ This is an **active research project**. We are continuously exploring new fusion
   <td align="center" width="33%" style="padding: 5px;">
     <b>Input Images</b><br>
     <table width="100%" cellpadding="2" cellspacing="2">
-    <tr>
-      <td align="center"><img src="data/example/images/1.png" width="80px"/></td>
-      <td align="center"><img src="data/example/images/2.png" width="80px"/></td>
-      <td align="center"><img src="data/example/images/3.png" width="80px"/></td>
-      <td align="center"><img src="data/example/images/4.png" width="80px"/></td>
-    </tr>
-    <tr>
-      <td align="center"><img src="data/example/images/5.png" width="80px"/></td>
-      <td align="center"><img src="data/example/images/6.png" width="80px"/></td>
-      <td align="center"><img src="data/example/images/7.png" width="80px"/></td>
-      <td align="center"><img src="data/example/images/8.png" width="80px"/></td>
-    </tr>
+      <tr>
+        <td align="center"><img src="data/example/images/1.png" width="80px"/></td>
+        <td align="center"><img src="data/example/images/2.png" width="80px"/></td>
+        <td align="center"><img src="data/example/images/3.png" width="80px"/></td>
+        <td align="center"><img src="data/example/images/4.png" width="80px"/></td>
+      </tr>
+      <tr>
+        <td align="center"><img src="data/example/images/5.png" width="80px"/></td>
+        <td align="center"><img src="data/example/images/6.png" width="80px"/></td>
+        <td align="center"><img src="data/example/images/7.png" width="80px"/></td>
+        <td align="center"><img src="data/example/images/8.png" width="80px"/></td>
+      </tr>
     </table>
   </td>
 </tr>
@@ -63,129 +76,103 @@ This is an **active research project**. We are continuously exploring new fusion
 </tr>
 <tr>
   <td align="center" width="33%" style="padding: 5px;">
-    <b>3D Result</b><br>
     <img src="data/example/visualization_results/view3_cropped.gif" width="100%" style="max-width: 300px;"/>
+    <br><sub>Single-view baseline.</sub>
   </td>
   <td align="center" width="33%" style="padding: 5px;">
-    <b>3D Result</b><br>
     <img src="data/example/visualization_results/view6_cropped.gif" width="100%" style="max-width: 300px;"/>
+    <br><sub>Single-view baseline.</sub>
   </td>
   <td align="center" width="33%" style="padding: 5px;">
-    <b>3D Result</b><br>
     <img src="data/example/visualization_results/all_views_cropped.gif" width="100%" style="max-width: 300px;"/>
+    <br><sub>Better multi-view consistency.</sub>
   </td>
 </tr>
 </table>
 
-## Installation
+### Multi-object
 
-Please follow the installation instructions in the [basic multi-view version](https://github.com/devinli123/multi-view-sam-3d-objects) or in [SAM 3D Objects](https://github.com/facebookresearch/sam-3d-objects).
+<table>
+<tr>
+  <td align="center" width="33%"><b>SAM 3D (single-view)</b></td>
+  <td align="center" width="33%"><b>MV-SAM3D w/o Pose Optimization</b></td>
+  <td align="center" width="33%"><b>MV-SAM3D (full)</b></td>
+</tr>
+<tr>
+  <td align="center" width="33%" style="padding: 5px;">
+    <img src="data/example/visualization_results/laptop_scene_0_sam3d.gif" width="100%" style="max-width: 300px;"/>
+    <br><sub>Shape and pose are often unstable.</sub>
+  </td>
+  <td align="center" width="33%" style="padding: 5px;">
+    <img src="data/example/visualization_results/laptop_scene_0_mvsam3d.gif" width="100%" style="max-width: 300px;"/>
+    <br><sub>Multi-view improves object quality.</sub>
+  </td>
+  <td align="center" width="33%" style="padding: 5px;">
+    <img src="data/example/visualization_results/laptop_scene_0_mvsam3d_optimized.gif" width="100%" style="max-width: 300px;"/>
+    <br><sub>Improved overall scene alignment.</sub>
+  </td>
+</tr>
+</table>
 
 ## Quick Start
 
-### Basic Usage (Both Stages Weighted by Default)
+### Single-object inference
 
 ```bash
 python run_inference_weighted.py \
-    --input_path ./data/example \
-    --mask_prompt stuffed_toy \
-    --image_names 0,1,2,3,4,5,6,7
+  --input_path ./data/example \
+  --mask_prompt stuffed_toy \
+  --da3_output ./da3_outputs/example/da3_output.npz
 ```
 
-### Disable All Weighting (Simple Average)
+### Multi-object inference
 
 ```bash
 python run_inference_weighted.py \
-    --input_path ./data/example \
-    --mask_prompt stuffed_toy \
-    --image_names 0,1,2,3,4,5,6,7 \
-    --no_stage1_weighting --no_stage2_weighting
+  --input_path ./data/desk_objects0 \
+  --mask_prompt keyboard,speaker,mug,stuffed_toy \
+  --da3_output ./da3_outputs/desk_objects0/da3_output.npz \
+  --merge_da3_glb \
+  --run_pose_optimization
 ```
 
-### Using Visibility Weighting (Requires DA3)
+## Default Settings (No Extra Flags)
 
-To use visibility-based weighting for Stage 2, you need to first run Depth Anything 3 (DA3) to obtain camera poses:
+For single-object inference (`run_inference_weighted.py`), key defaults are:
 
-**Step 1: Install Depth Anything 3**
+- Stage 1 weighting: enabled (`stage1_entropy_alpha=30.0`)
+- Stage 2 weighting: enabled (`stage2_weight_source=entropy`)
+- Stage 2 alpha defaults: `stage2_entropy_alpha=30.0`, `stage2_visibility_alpha=30.0`
 
-Please follow the installation instructions at [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3).
+## Preprocessing for a New Scene
 
-**Step 2: Run DA3 to get camera poses**
+```bash
+python preprocessing/build_mvsam3d_dataset.py \
+  --input data/your_scene \
+  --objects keyboard,speaker,mug,stuffed_toy
+```
 
 ```bash
 python scripts/run_da3.py \
-    --image_dir ./data/example/images \
-    --output_dir ./da3_outputs/example
+  --image_dir ./data/your_scene/images \
+  --output_dir ./da3_outputs/your_scene
 ```
 
-**Step 3: Run weighted inference with visibility**
+## Citation
 
-```bash
-python run_inference_weighted.py \
-    --input_path ./data/example \
-    --mask_prompt stuffed_toy \
-    --image_names 0,1,2,3,4,5,6,7 \
-    --da3_output ./da3_outputs/example/da3_output.npz \
-    --stage2_weight_source visibility
+```bibtex
+@article{li2026mv,
+  title={MV-SAM3D: Adaptive Multi-View Fusion for Layout-Aware 3D Generation},
+  author={Li, Baicheng and Wu, Dong and Li, Jun and Zhou, Shunkai and Zeng, Zecui and Li, Lusong and Zha, Hongbin},
+  journal={arXiv preprint arXiv:2603.11633},
+  year={2026}
+}
 ```
-
-## Key Parameters
-
-### Basic
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `--input_path` | Path to input directory | Required |
-| `--mask_prompt` | Mask folder name | None |
-| `--image_names` | Image names (comma-separated) | All images |
-| `--da3_output` | Path to DA3 output (for visibility weighting) | None |
-
-### Stage 1 (Shape) Weighting
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `--no_stage1_weighting` | Disable Stage 1 weighting | False (enabled) |
-| `--stage1_entropy_layer` | Attention layer for weight computation | 9 |
-| `--stage1_entropy_alpha` | Entropy weighting sharpness | 30.0 |
-
-### Stage 2 (Texture) Weighting
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `--no_stage2_weighting` | Disable Stage 2 weighting | False (enabled) |
-| `--stage2_weight_source` | `entropy`, `visibility`, or `mixed` | `entropy` |
-| `--stage2_entropy_alpha` | Entropy weighting sharpness | 30.0 |
-| `--stage2_visibility_alpha` | Visibility weighting sharpness | 30.0 |
-| `--stage2_attention_layer` | Attention layer for weight computation | 6 |
-| `--self_occlusion_tolerance` | Tolerance for visibility detection | 4.0 |
-
-### Visualization
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `--visualize_weights` | Visualize fusion weights | False |
-| `--compute_latent_visibility` | Visualize latent visibility per view | False |
-| `--overlay_pointmap` | Overlay result on View 0 pointmap | False |
-| `--merge_da3_glb` | Merge result with DA3 scene | False |
-
-📖 **Full Parameters**: See [README_PARAMETERS.md](README_PARAMETERS.md) for detailed parameter documentation.
-
-### Data Structure
-
-```
-input_path/
-├── images/
-│   ├── 0.png
-│   ├── 1.png
-│   └── ...
-└── object_name/  # mask folder
-    ├── 0.png
-    ├── 1.png
-    └── ...
-```
-
-**Mask Format**: RGBA format where alpha channel stores mask (alpha=255 for object, alpha=0 for background).
 
 ## Acknowledgments
 
-This project builds upon [SAM 3D Objects](https://github.com/facebookresearch/sam-3d-objects) by Meta. We thank the original authors for their excellent work.
+We thank the authors of [SAM 3D Objects](https://github.com/facebookresearch/sam-3d-objects) and [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3) for their excellent work.
 
 ## License
 
-This project inherits the [SAM License](./LICENSE) from the original SAM 3D Objects project.
+Please refer to [LICENSE](./LICENSE) for usage terms.

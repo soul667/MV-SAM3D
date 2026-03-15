@@ -1954,6 +1954,558 @@ def get_output_dir(
     return output_dir
 
 
+def merge_multiple_objects_glb(
+    object_results: List[dict],
+    da3_output_dir: Optional[Path] = None,
+    output_dir: Path = None,
+    merge_with_da3_scene: bool = False,
+) -> Optional[Path]:
+    """
+    Merge multiple SAM3D objects into a single GLB file.
+    
+    Strategy: Load the already-merged GLB files (result_merged_scene_optimized.glb 
+    or result_merged_scene.glb) for each object. These are already in DA3 aligned space,
+    so we just combine them directly without any coordinate transformations.
+    
+    Args:
+        object_results: List of dicts, each containing:
+            - 'output_dir': Path to the object's output directory
+            - 'object_name': Name of the object
+            - 'optimized_glb_path': Path to optimized canonical GLB (optional)
+            - 'merged_optimized_path': Path to optimized merged GLB (optional)
+        da3_output_dir: DA3 output directory (for scene merging)
+        output_dir: Output directory for multi-object results
+        merge_with_da3_scene: Whether to merge with DA3 scene
+    
+    Returns:
+        Path to the merged GLB file
+    """
+    try:
+        import trimesh
+    except ImportError:
+        logger.warning("trimesh not installed, cannot merge GLB files")
+        return None
+    
+    if not object_results:
+        logger.warning("No objects to merge")
+        return None
+    
+    logger.info(f"\n{'='*70}")
+    logger.info(f"[Multi-Object Merge] Merging {len(object_results)} objects...")
+    logger.info(f"{'='*70}")
+    
+    # Helper function to extract SAM3D mesh from merged GLB
+    def extract_sam3d_mesh(merged_glb_path: Path, obj_name: str) -> Optional[trimesh.Trimesh]:
+        """Extract SAM3D mesh from a merged GLB file."""
+        if not merged_glb_path.exists():
+            return None
+        
+        obj_scene = trimesh.load(str(merged_glb_path))
+        
+        # Find the largest mesh with faces (that's the SAM3D object)
+        obj_mesh = None
+        if isinstance(obj_scene, trimesh.Scene):
+            candidate_meshes = []
+            for name, geom in obj_scene.geometry.items():
+                if hasattr(geom, 'vertices') and hasattr(geom, 'faces'):
+                    try:
+                        if len(geom.faces) > 0:
+                            candidate_meshes.append((name, geom, len(geom.vertices)))
+                    except (AttributeError, TypeError):
+                        continue
+            
+            if candidate_meshes:
+                candidate_meshes.sort(key=lambda x: x[2], reverse=True)
+                obj_mesh = candidate_meshes[0][1]
+                logger.info(f"  Found SAM3D mesh: {candidate_meshes[0][0]} ({candidate_meshes[0][2]} vertices)")
+        else:
+            if hasattr(obj_scene, 'vertices') and hasattr(obj_scene, 'faces'):
+                try:
+                    if len(obj_scene.faces) > 0:
+                        obj_mesh = obj_scene
+                except (AttributeError, TypeError):
+                    pass
+        
+        return obj_mesh
+    
+    # Collect geometries from individual object GLBs (both original and optimized)
+    # These GLBs are already in DA3 aligned space
+    combined_geometries_original = {}
+    combined_geometries_optimized = {}
+    
+    for i, obj_result in enumerate(object_results):
+        obj_name = obj_result['object_name']
+        obj_output_dir = obj_result['output_dir']
+        
+        logger.info(f"\n[Object {i+1}/{len(object_results)}] Processing: {obj_name}")
+        
+        # Try to load original merged GLB
+        original_merged_glb = obj_output_dir / "result_merged_scene.glb"
+        original_mesh = None
+        if original_merged_glb.exists():
+            logger.info(f"  Loading original merged GLB: {original_merged_glb}")
+            original_mesh = extract_sam3d_mesh(original_merged_glb, obj_name)
+            if original_mesh is not None:
+                combined_geometries_original[f"object_{i}_{obj_name}"] = original_mesh
+                logger.info(f"  ✓ Added original mesh: {len(original_mesh.vertices)} vertices")
+        
+        # Try to load optimized merged GLB
+        optimized_mesh = None
+        if 'merged_optimized_path' in obj_result and obj_result['merged_optimized_path']:
+            optimized_merged_glb = obj_result['merged_optimized_path']
+            if optimized_merged_glb.exists():
+                logger.info(f"  Loading optimized merged GLB: {optimized_merged_glb}")
+                optimized_mesh = extract_sam3d_mesh(optimized_merged_glb, obj_name)
+                if optimized_mesh is not None:
+                    combined_geometries_optimized[f"object_{i}_{obj_name}"] = optimized_mesh
+                    logger.info(f"  ✓ Added optimized mesh: {len(optimized_mesh.vertices)} vertices")
+        
+        if original_mesh is None and optimized_mesh is None:
+            logger.warning(f"  No valid mesh found for {obj_name}, skipping")
+    
+    # Check if we have any valid objects
+    if not combined_geometries_original and not combined_geometries_optimized:
+        logger.error("No valid objects to merge")
+        return None
+    
+    # Function to create and save combined scene
+    def save_combined_scene(geometries: dict, output_path: Path, scene_name: str):
+        """Create and save a combined scene from geometries."""
+        combined_scene = trimesh.Scene()
+        for name, geom in geometries.items():
+            combined_scene.add_geometry(geom, node_name=name)
+        combined_scene.export(str(output_path))
+        logger.info(f"✓ {scene_name} saved: {output_path}")
+        logger.info(f"  Total objects: {len(geometries)}")
+    
+    # Function to merge with DA3 scene
+    def merge_with_da3(geometries: dict, output_path: Path, scene_name: str):
+        """Merge geometries with DA3 scene."""
+        da3_scene_glb = da3_output_dir / "scene.glb"
+        if not da3_scene_glb.exists():
+            logger.warning(f"DA3 scene.glb not found: {da3_scene_glb}")
+            return None
+        
+        try:
+            da3_scene = trimesh.load(str(da3_scene_glb))
+            merged_scene = trimesh.Scene()
+            
+            # Add DA3 scene geometries
+            if isinstance(da3_scene, trimesh.Scene):
+                for name, geom in da3_scene.geometry.items():
+                    merged_scene.add_geometry(geom, node_name=f"da3_{name}")
+            else:
+                merged_scene.add_geometry(da3_scene, node_name="da3_scene")
+            
+            # Add objects (already in aligned space, no transformation needed!)
+            for name, geom in geometries.items():
+                merged_scene.add_geometry(geom, node_name=f"sam3d_{name}")
+            
+            merged_scene.export(str(output_path))
+            logger.info(f"✓ {scene_name} saved: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.error(f"Failed to merge with DA3 scene: {e}")
+            return None
+    
+    # Save original version (pure multi-object, no DA3 scene)
+    if combined_geometries_original:
+        save_combined_scene(
+            combined_geometries_original,
+            output_dir / "result_multiobj_merged.glb",
+            "Multi-object GLB (original pose)"
+        )
+    
+    has_real_optimized = bool(combined_geometries_optimized)
+    if not has_real_optimized:
+        logger.info("No real pose-optimized object meshes found; skip exporting optimized multi-object files.")
+
+    # Save optimized version (pure multi-object, no DA3 scene)
+    if has_real_optimized:
+        save_combined_scene(
+            combined_geometries_optimized,
+            output_dir / "result_multiobj_merged_optimized.glb",
+            "Multi-object GLB (optimized pose)"
+        )
+    
+    # Optionally merge with DA3 scene
+    if merge_with_da3_scene and da3_output_dir:
+        # Original + DA3 scene
+        if combined_geometries_original:
+            merge_with_da3(
+                combined_geometries_original,
+                output_dir / "result_multiobj_merged_scene.glb",
+                "Multi-object + DA3 scene GLB (original pose)"
+            )
+        
+        # Optimized + DA3 scene
+        if has_real_optimized:
+            merged_optimized_path = merge_with_da3(
+                combined_geometries_optimized,
+                output_dir / "result_multiobj_merged_scene_optimized.glb",
+                "Multi-object + DA3 scene GLB (optimized pose)"
+            )
+            if merged_optimized_path:
+                return merged_optimized_path
+    
+    # Return the optimized merged scene path if available, otherwise original
+    if has_real_optimized:
+        return output_dir / "result_multiobj_merged_optimized.glb"
+    elif combined_geometries_original:
+        return output_dir / "result_multiobj_merged.glb"
+    else:
+        return None
+
+
+def run_multiobject_inference(
+    input_path: Path,
+    mask_prompts: List[str],
+    image_names: Optional[List[str]] = None,
+    seed: int = 42,
+    stage1_steps: int = 50,
+    stage2_steps: int = 25,
+    decode_formats: List[str] = None,
+    model_tag: str = "hf",
+    # Stage 1 (Shape) Weighting parameters
+    stage1_weighting: bool = True,
+    stage1_entropy_layer: int = 9,
+    stage1_entropy_alpha: float = 30.0,
+    # Stage 2 (Texture) Weighting parameters
+    stage2_weighting: bool = True,
+    stage2_weight_source: str = "entropy",
+    stage2_entropy_alpha: float = 30.0,
+    stage2_visibility_alpha: float = 30.0,
+    stage2_attention_layer: int = 6,
+    stage2_attention_step: int = 0,
+    stage2_min_weight: float = 0.001,
+    stage2_weight_combine_mode: str = "average",
+    stage2_visibility_weight_ratio: float = 0.5,
+    # Visualization
+    visualize_weights: bool = False,
+    save_attention: bool = False,
+    attention_layers_to_save: Optional[List[int]] = None,
+    save_stage2_init: bool = False,
+    # DA3 integration
+    da3_output_path: Optional[str] = None,
+    merge_da3_glb: bool = False,
+    overlay_pointmap: bool = False,
+    enable_latent_visibility: bool = False,
+    self_occlusion_tolerance: float = 4.0,
+    # Pose optimization
+    run_pose_optimization: bool = False,
+    pose_opt_iterations: int = 300,
+    pose_opt_lr: float = 0.01,
+    pose_opt_mask_erosion: int = 3,
+    pose_opt_device: str = "cuda",
+    pose_opt_optimize_scale: bool = False,
+):
+    """
+    Run multi-object inference: process each object sequentially, then merge.
+    
+    Args:
+        input_path: Input data path
+        mask_prompts: List of mask folder names (one per object)
+        ... (other parameters same as run_weighted_inference)
+    """
+    logger.info(f"\n{'='*70}")
+    logger.info(f"MULTI-OBJECT INFERENCE")
+    logger.info(f"{'='*70}")
+    logger.info(f"Number of objects: {len(mask_prompts)}")
+    logger.info(f"Objects: {mask_prompts}")
+    logger.info(f"Input path: {input_path}")
+    logger.info(f"{'='*70}\n")
+    
+    # Create multi-object output directory
+    dataset_name = input_path.name
+    multiobj_name = "_".join(mask_prompts)
+    
+    # Build directory name similar to single-object mode
+    dir_name = f"{dataset_name}_{multiobj_name}_multiobj"
+    
+    # Add weighting info to directory name
+    if stage1_weighting:
+        dir_name = f"{dir_name}_s1a{stage1_entropy_alpha:g}"
+    else:
+        dir_name = f"{dir_name}_s1off"
+    
+    if stage2_weighting:
+        if stage2_weight_source == "entropy":
+            dir_name = f"{dir_name}_s2e{stage2_entropy_alpha:g}"
+        elif stage2_weight_source == "visibility":
+            dir_name = f"{dir_name}_s2v{stage2_visibility_alpha:g}"
+        elif stage2_weight_source == "mixed":
+            e_str = f"{stage2_entropy_alpha:g}"
+            v_str = f"{stage2_visibility_alpha:g}"
+            dir_name = f"{dir_name}_s2m_e{e_str}v{v_str}"
+    else:
+        dir_name = f"{dir_name}_s2off"
+    
+    # Add timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dir_name = f"{dir_name}_{timestamp}"
+    
+    # Create output directory
+    visualization_dir = Path("visualization")
+    multiobj_output_dir = visualization_dir / dataset_name / "multiobject" / dir_name
+    multiobj_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    logger.info(f"Multi-object output directory: {multiobj_output_dir}\n")
+    
+    # Store results for each object
+    object_results = []
+    
+    # Process each object sequentially
+    for i, mask_prompt in enumerate(mask_prompts):
+        logger.info(f"\n{'='*70}")
+        logger.info(f"[Object {i+1}/{len(mask_prompts)}] Processing: {mask_prompt}")
+        logger.info(f"{'='*70}\n")
+        
+        # Create subdirectory for this object
+        object_output_dir = multiobj_output_dir / mask_prompt
+        object_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Run single-object inference for this object
+        # We'll temporarily redirect output to the object's subdirectory
+        try:
+            # We need to capture the GLB path and pose from run_weighted_inference
+            # For now, let's create a wrapper that saves this info
+            result = run_single_object_for_multiobject(
+                input_path=input_path,
+                mask_prompt=mask_prompt,
+                image_names=image_names,
+                object_output_dir=object_output_dir,
+                seed=seed,
+                stage1_steps=stage1_steps,
+                stage2_steps=stage2_steps,
+                decode_formats=decode_formats,
+                model_tag=model_tag,
+                stage1_weighting=stage1_weighting,
+                stage1_entropy_layer=stage1_entropy_layer,
+                stage1_entropy_alpha=stage1_entropy_alpha,
+                stage2_weighting=stage2_weighting,
+                stage2_weight_source=stage2_weight_source,
+                stage2_entropy_alpha=stage2_entropy_alpha,
+                stage2_visibility_alpha=stage2_visibility_alpha,
+                stage2_attention_layer=stage2_attention_layer,
+                stage2_attention_step=stage2_attention_step,
+                stage2_min_weight=stage2_min_weight,
+                stage2_weight_combine_mode=stage2_weight_combine_mode,
+                stage2_visibility_weight_ratio=stage2_visibility_weight_ratio,
+                visualize_weights=visualize_weights,
+                save_attention=save_attention,
+                attention_layers_to_save=attention_layers_to_save,
+                save_stage2_init=save_stage2_init,
+                da3_output_path=da3_output_path,
+                merge_da3_glb=True,  # Generate merged scene for each individual object
+                overlay_pointmap=overlay_pointmap,
+                enable_latent_visibility=enable_latent_visibility,
+                self_occlusion_tolerance=self_occlusion_tolerance,
+                run_pose_optimization=run_pose_optimization,
+                pose_opt_iterations=pose_opt_iterations,
+                pose_opt_lr=pose_opt_lr,
+                pose_opt_mask_erosion=pose_opt_mask_erosion,
+                pose_opt_device=pose_opt_device,
+                pose_opt_optimize_scale=pose_opt_optimize_scale,
+            )
+            
+            if result:
+                obj_result = {
+                    'object_name': mask_prompt,
+                    'glb_path': result['glb_path'],
+                    'pose': result['pose'],
+                    'output_dir': object_output_dir,
+                }
+                # Add optional paths if they exist
+                if 'optimized_glb_path' in result:
+                    obj_result['optimized_glb_path'] = result['optimized_glb_path']
+                if 'merged_optimized_path' in result:
+                    obj_result['merged_optimized_path'] = result['merged_optimized_path']
+                
+                object_results.append(obj_result)
+                logger.info(f"\n✓ Object {i+1}/{len(mask_prompts)} completed: {mask_prompt}")
+            else:
+                logger.error(f"\n✗ Object {i+1}/{len(mask_prompts)} failed: {mask_prompt}")
+                
+        except Exception as e:
+            logger.error(f"Failed to process object {mask_prompt}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    # Merge all objects
+    if object_results:
+        logger.info(f"\n{'='*70}")
+        logger.info(f"[Multi-Object] Merging {len(object_results)} objects...")
+        logger.info(f"{'='*70}\n")
+        
+        da3_dir = Path(da3_output_path).parent if da3_output_path else None
+        
+        merged_glb_path = merge_multiple_objects_glb(
+            object_results=object_results,
+            da3_output_dir=da3_dir,
+            output_dir=multiobj_output_dir,
+            merge_with_da3_scene=merge_da3_glb,
+        )
+        
+        if merged_glb_path:
+            logger.info(f"\n{'='*70}")
+            logger.info(f"[Multi-Object] COMPLETE!")
+            logger.info(f"{'='*70}")
+            logger.info(f"Output directory: {multiobj_output_dir}")
+            logger.info(f"Merged GLB: {merged_glb_path}")
+            logger.info(f"Individual objects: {[r['output_dir'] for r in object_results]}")
+            logger.info(f"{'='*70}\n")
+    else:
+        logger.error("No objects were successfully processed")
+
+
+def run_single_object_for_multiobject(
+    input_path: Path,
+    mask_prompt: str,
+    object_output_dir: Path,
+    image_names: Optional[List[str]] = None,
+    seed: int = 42,
+    stage1_steps: int = 50,
+    stage2_steps: int = 25,
+    decode_formats: List[str] = None,
+    model_tag: str = "hf",
+    stage1_weighting: bool = True,
+    stage1_entropy_layer: int = 9,
+    stage1_entropy_alpha: float = 30.0,
+    stage2_weighting: bool = True,
+    stage2_weight_source: str = "entropy",
+    stage2_entropy_alpha: float = 30.0,
+    stage2_visibility_alpha: float = 30.0,
+    stage2_attention_layer: int = 6,
+    stage2_attention_step: int = 0,
+    stage2_min_weight: float = 0.001,
+    stage2_weight_combine_mode: str = "average",
+    stage2_visibility_weight_ratio: float = 0.5,
+    visualize_weights: bool = False,
+    save_attention: bool = False,
+    attention_layers_to_save: Optional[List[int]] = None,
+    save_stage2_init: bool = False,
+    da3_output_path: Optional[str] = None,
+    merge_da3_glb: bool = False,
+    overlay_pointmap: bool = False,
+    enable_latent_visibility: bool = False,
+    self_occlusion_tolerance: float = 4.0,
+    run_pose_optimization: bool = False,
+    pose_opt_iterations: int = 300,
+    pose_opt_lr: float = 0.01,
+    pose_opt_mask_erosion: int = 3,
+    pose_opt_device: str = "cuda",
+    pose_opt_optimize_scale: bool = False,
+) -> Optional[dict]:
+    """
+    Wrapper for run_weighted_inference that returns GLB path and pose for multi-object merging.
+    
+    This function calls run_weighted_inference and returns its result dict.
+    The output is saved in object_output_dir (not the standard visualization directory).
+    
+    Returns:
+        Dict with 'glb_path', 'pose', and 'output_dir', or None if failed
+    """
+    # We need to temporarily modify where the output goes
+    # The easiest way is to let run_weighted_inference create its standard output,
+    # then read and return the result
+    
+    result_dict = run_weighted_inference(
+        input_path=input_path,
+        mask_prompt=mask_prompt,
+        image_names=image_names,
+        seed=seed,
+        stage1_steps=stage1_steps,
+        stage2_steps=stage2_steps,
+        decode_formats=decode_formats,
+        model_tag=model_tag,
+        stage1_weighting=stage1_weighting,
+        stage1_entropy_layer=stage1_entropy_layer,
+        stage1_entropy_alpha=stage1_entropy_alpha,
+        stage2_weighting=stage2_weighting,
+        stage2_weight_source=stage2_weight_source,
+        stage2_entropy_alpha=stage2_entropy_alpha,
+        stage2_visibility_alpha=stage2_visibility_alpha,
+        stage2_attention_layer=stage2_attention_layer,
+        stage2_attention_step=stage2_attention_step,
+        stage2_min_weight=stage2_min_weight,
+        stage2_weight_combine_mode=stage2_weight_combine_mode,
+        stage2_visibility_weight_ratio=stage2_visibility_weight_ratio,
+        visualize_weights=visualize_weights,
+        save_attention=save_attention,
+        attention_layers_to_save=attention_layers_to_save,
+        save_stage2_init=save_stage2_init,
+        da3_output_path=da3_output_path,
+        merge_da3_glb=merge_da3_glb,
+        overlay_pointmap=overlay_pointmap,
+        enable_latent_visibility=enable_latent_visibility,
+        self_occlusion_tolerance=self_occlusion_tolerance,
+        run_pose_optimization=run_pose_optimization,
+        pose_opt_iterations=pose_opt_iterations,
+        pose_opt_lr=pose_opt_lr,
+        pose_opt_mask_erosion=pose_opt_mask_erosion,
+        pose_opt_device=pose_opt_device,
+        pose_opt_optimize_scale=pose_opt_optimize_scale,
+    )
+    
+    # Copy result files to object_output_dir
+    if result_dict and result_dict['glb_path']:
+        try:
+            import shutil
+            source_dir = result_dict['output_dir']
+            
+            # Copy the GLB file
+            dest_glb = object_output_dir / result_dict['glb_path'].name
+            shutil.copy2(result_dict['glb_path'], dest_glb)
+            
+            # Copy all result files (GLB, PLY, params, etc.)
+            extra_files = [
+                'result.glb',
+                'result.ply',
+                'result_merged_scene.glb',
+                'result_merged_scene_optimized.glb',
+                'result_pose_optimized.glb',
+                'params.npz',
+                'inference.log',
+            ]
+            for extra_file_name in extra_files:
+                extra_file = source_dir / extra_file_name
+                if extra_file.exists():
+                    shutil.copy2(extra_file, object_output_dir / extra_file_name)
+            
+            # Copy pose optimization results if available
+            pose_opt_dir = source_dir / "pose_optimization"
+            if pose_opt_dir.exists():
+                dest_pose_opt_dir = object_output_dir / "pose_optimization"
+                dest_pose_opt_dir.mkdir(parents=True, exist_ok=True)
+                for file in pose_opt_dir.glob("*.npz"):
+                    shutil.copy2(file, dest_pose_opt_dir / file.name)
+            
+            # Update the returned paths to point to the new location
+            result_dict['glb_path'] = dest_glb
+            result_dict['output_dir'] = object_output_dir
+            
+            # Update merged paths if they were in the original result
+            if 'optimized_glb_path' in result_dict:
+                result_dict['optimized_glb_path'] = object_output_dir / result_dict['optimized_glb_path'].name
+            if 'merged_optimized_path' in result_dict:
+                result_dict['merged_optimized_path'] = object_output_dir / result_dict['merged_optimized_path'].name
+            
+            logger.info(f"✓ Copied results to: {object_output_dir}")
+            
+            # Delete the original directory to avoid duplicate storage
+            try:
+                shutil.rmtree(source_dir)
+                logger.info(f"✓ Removed original directory: {source_dir}")
+            except Exception as del_e:
+                logger.warning(f"Failed to remove original directory {source_dir}: {del_e}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to copy results to {object_output_dir}: {e}")
+    
+    return result_dict
+
+
 def run_weighted_inference(
     input_path: Path,
     mask_prompt: Optional[str] = None,
@@ -1989,6 +2541,13 @@ def run_weighted_inference(
     overlay_pointmap: bool = False,
     enable_latent_visibility: bool = False,
     self_occlusion_tolerance: float = 4.0,
+    # Pose optimization
+    run_pose_optimization: bool = False,
+    pose_opt_iterations: int = 300,
+    pose_opt_lr: float = 0.01,
+    pose_opt_mask_erosion: int = 3,
+    pose_opt_device: str = "cuda",
+    pose_opt_optimize_scale: bool = False,
 ):
     """
     Run weighted inference with adaptive multi-view fusion.
@@ -2042,7 +2601,7 @@ def run_weighted_inference(
     if mask_prompt:
         logger.info(f"Mask prompt: {mask_prompt}")
     
-    view_images, view_masks = load_images_and_masks_from_path(
+    view_images, view_masks, loaded_image_names = load_images_and_masks_from_path(
         input_path=input_path,
         mask_prompt=mask_prompt,
         image_names=image_names,
@@ -2050,6 +2609,19 @@ def run_weighted_inference(
     
     num_views = len(view_images)
     logger.info(f"Successfully loaded {num_views} views")
+    logger.info(f"Loaded image names (natural sort order): {loaded_image_names}")
+    
+    # Verify sorting is numeric (not lexicographic)
+    if loaded_image_names:
+        try:
+            numeric_names = sorted([int(n) for n in loaded_image_names])
+            expected_order = [str(n) for n in numeric_names]
+            if loaded_image_names != expected_order:
+                logger.warning(f"Image names NOT in numeric order! Loaded: {loaded_image_names}, Expected: {expected_order}")
+            else:
+                logger.info(f"Image names are in correct numeric order ✓")
+        except ValueError:
+            logger.info(f"Image names contain non-numeric values, skipping order check")
     
     # Load external pointmaps from DA3 if provided
     view_pointmaps = None
@@ -2094,32 +2666,10 @@ def run_weighted_inference(
             da3_intrinsics = da3_data["intrinsics"]
             logger.info(f"  DA3 intrinsics shape: {da3_intrinsics.shape}")
         
-        # Get inference image file names for matching
-        # Re-detect the image names using the same logic as load_images_and_masks
-        if mask_prompt:
-            images_dir = input_path / "images"
-        else:
-            images_dir = input_path
+        # Use the actually loaded image names (which already excludes views with missing masks)
+        inference_image_names = loaded_image_names
         
-        # Get inference image order (using natural sort)
-        def natural_sort_key(path):
-            stem = path.stem
-            try:
-                return (0, int(stem), stem)
-            except ValueError:
-                return (1, 0, stem)
-        
-        if image_names:
-            # User specified image names
-            inference_image_names = list(image_names)
-        else:
-            # Auto-detect
-            inf_image_files = list(images_dir.glob("*.png")) + list(images_dir.glob("*.jpg"))
-            inf_image_files = [f for f in inf_image_files if "_mask" not in f.name]
-            inf_image_files = sorted(inf_image_files, key=natural_sort_key)
-            inference_image_names = [f.stem for f in inf_image_files]
-        
-        logger.info(f"  Inference image order: {inference_image_names}")
+        logger.info(f"  Inference image order (actually loaded): {inference_image_names}")
         
         # Build DA3 filename -> index mapping
         da3_file_mapping = {}
@@ -2376,6 +2926,14 @@ def run_weighted_inference(
         logger.info("Single-view inference mode")
         image = view_images[0]
         mask = view_masks[0] if view_masks else None
+        # Get external pointmap for single view (if DA3 output was provided)
+        single_view_pointmap = None
+        if view_pointmaps is not None and len(view_pointmaps) > 0:
+            single_view_pointmap = view_pointmaps[0]
+            if single_view_pointmap is not None:
+                logger.info(f"Using external pointmap from DA3 for single view, shape={single_view_pointmap.shape}")
+                # Convert to tensor if needed
+                single_view_pointmap = torch.from_numpy(single_view_pointmap).float()
         result = inference._pipeline.run(
             image,
             mask,
@@ -2388,6 +2946,7 @@ def run_weighted_inference(
             stage2_inference_steps=stage2_steps,
             decode_formats=decode_formats,
             attention_logger=attention_logger,
+            pointmap=single_view_pointmap,  # Pass DA3 pointmap for single view
         )
         weight_manager = None
     else:
@@ -2396,6 +2955,30 @@ def run_weighted_inference(
         logger.info(f"Multi-view inference mode: Stage1={s1_mode}, Stage2={s2_mode}")
         if view_pointmaps is not None:
             logger.info(f"Using external pointmaps from DA3")
+        
+        # Save debug masked images to visually verify image-mask-pointmap alignment
+        debug_dir = output_dir / "debug_masked_images"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Saving debug masked images to: {debug_dir}")
+        for di, (d_img, d_mask) in enumerate(zip(view_images, view_masks)):
+            d_name = loaded_image_names[di] if di < len(loaded_image_names) else f"view_{di}"
+            try:
+                from PIL import Image as PILImage
+                # Save original image
+                PILImage.fromarray(d_img.astype(np.uint8) if d_img.dtype != np.uint8 else d_img).save(
+                    debug_dir / f"{di:02d}_{d_name}_image.png"
+                )
+                # Save masked overlay (red tint on masked region)
+                overlay = d_img.copy().astype(np.float32)
+                mask_bool = d_mask > 0 if d_mask.dtype != bool else d_mask
+                overlay[mask_bool] = overlay[mask_bool] * 0.5 + np.array([255, 0, 0], dtype=np.float32) * 0.5
+                PILImage.fromarray(overlay.astype(np.uint8)).save(
+                    debug_dir / f"{di:02d}_{d_name}_masked.png"
+                )
+            except Exception as e:
+                logger.warning(f"  Failed to save debug image {d_name}: {e}")
+        logger.info(f"  Saved {len(view_images)} debug images (check alignment in {debug_dir})")
+        
         result = inference._pipeline.run_multi_view(
             view_images=view_images,
             view_masks=view_masks,
@@ -2968,6 +3551,297 @@ def run_weighted_inference(
                 
         except ImportError as e:
             logger.warning(f"Could not generate visualizations: {e}")
+    
+    # ========================================
+    # Pose Optimization (if requested)
+    # ========================================
+    if run_pose_optimization:
+        logger.info("\n" + "=" * 70)
+        logger.info("[Pose Optimization] Starting pose optimization...")
+        logger.info("=" * 70)
+        
+        # Check prerequisites
+        if da3_dir is None:
+            logger.error("[Pose Optimization] DA3 output is required. Please specify --da3_output")
+        elif glb_path is None or not glb_path.exists():
+            logger.error("[Pose Optimization] SAM3D result.glb not found. Cannot run pose optimization.")
+        elif not all(k in result for k in ['scale', 'rotation', 'translation']):
+            logger.error("[Pose Optimization] Missing pose parameters in inference result.")
+        else:
+            try:
+                # Import pose optimization module
+                from sam3d_objects.pose_align.pose_optimization import (
+                    PoseOptimizer,
+                    extract_object_pointcloud_from_scene,
+                )
+                
+                # Prepare paths
+                da3_npz_path = str(da3_dir / "da3_output.npz")
+                da3_scene_glb = da3_dir / "scene.glb"
+                
+                # Load ALL masks from mask directory (not just inference masks)
+                # This ensures pose optimization uses complete point cloud from all views
+                masks = []
+                da3_data_for_masks = np.load(da3_npz_path)
+                num_da3_frames = da3_data_for_masks['depth'].shape[0]
+                
+                # Get DA3 image order for matching
+                da3_image_names = []
+                if "image_files" in da3_data_for_masks:
+                    da3_image_names = [Path(str(f)).stem for f in da3_data_for_masks["image_files"]]
+                else:
+                    # Fallback to numeric order
+                    da3_image_names = [str(i) for i in range(num_da3_frames)]
+                
+                logger.info(f"[Pose Optimization] Loading ALL {num_da3_frames} masks for complete point cloud extraction")
+                logger.info(f"  DA3 frame order: {da3_image_names}")
+                
+                # Determine mask directory
+                if mask_prompt:
+                    mask_dir = input_path / mask_prompt
+                else:
+                    mask_dir = input_path  # masks are in same dir with _mask suffix
+                
+                logger.info(f"  Loading masks from: {mask_dir}")
+                
+                for frame_idx, frame_name in enumerate(da3_image_names):
+                    mask_loaded = False
+                    
+                    # Try different mask file patterns
+                    mask_candidates = [
+                        mask_dir / f"{frame_name}.png",
+                        mask_dir / f"{frame_name}_mask.png",
+                        mask_dir / f"{frame_name}.jpg",
+                        mask_dir / f"{frame_name}_mask.jpg",
+                    ]
+                    
+                    for mask_path in mask_candidates:
+                        if mask_path.exists():
+                            try:
+                                from PIL import Image
+                                mask_img = Image.open(mask_path)
+                                mask_array = np.array(mask_img)
+                                
+                                # Extract mask from RGBA alpha channel or use as-is
+                                if mask_img.mode == 'RGBA' and mask_array.ndim == 3 and mask_array.shape[2] >= 4:
+                                    mask_np = (mask_array[..., 3] > 0).astype(np.uint8) * 255
+                                elif mask_array.ndim == 2:
+                                    mask_np = mask_array.astype(np.uint8)
+                                else:
+                                    mask_np = mask_array[..., 0].astype(np.uint8) if mask_array.ndim == 3 else mask_array.astype(np.uint8)
+                                
+                                masks.append(mask_np)
+                                logger.info(f"  Frame {frame_idx} ({frame_name}): loaded from {mask_path.name}, shape={mask_np.shape}")
+                                mask_loaded = True
+                                break
+                            except Exception as e:
+                                logger.warning(f"  Frame {frame_idx} ({frame_name}): failed to load {mask_path.name}: {e}")
+                    
+                    if not mask_loaded:
+                        masks.append(None)
+                        logger.warning(f"  Frame {frame_idx} ({frame_name}): no mask found, will skip this view")
+                
+                valid_masks = [m for m in masks if m is not None]
+                logger.info(f"[Pose Optimization] Loaded {len(valid_masks)}/{num_da3_frames} masks for pose optimization")
+                
+                # Extract target point cloud from DA3 scene
+                logger.info("\n[Pose Optimization] Extracting target point cloud from DA3 scene...")
+                target_points = extract_object_pointcloud_from_scene(
+                    scene_glb_path=str(da3_scene_glb),
+                    da3_npz_path=da3_npz_path,
+                    masks=masks if masks else None,
+                    mask_threshold=128,
+                    depth_tolerance=0.1,
+                    max_points=100000,
+                    mask_erosion_kernel=pose_opt_mask_erosion,
+                )
+                
+                if target_points is None or len(target_points) == 0:
+                    logger.error("[Pose Optimization] Failed to extract target point cloud")
+                else:
+                    logger.info(f"  Extracted {len(target_points)} target points")
+                    
+                    # Load DA3 alignment matrix
+                    try:
+                        import trimesh
+                        da3_scene = trimesh.load(str(da3_scene_glb))
+                        alignment_matrix = np.array(da3_scene.metadata.get('hf_alignment', np.eye(4)))
+                        logger.info(f"  Loaded alignment matrix from DA3 scene.glb")
+                    except Exception as e:
+                        logger.error(f"[Pose Optimization] Failed to load alignment matrix: {e}")
+                        alignment_matrix = np.eye(4)
+                    
+                    # Prepare initial pose
+                    initial_pose = {
+                        'scale': result['scale'].cpu().numpy() if torch.is_tensor(result['scale']) else result['scale'],
+                        'rotation': result['rotation'].cpu().numpy() if torch.is_tensor(result['rotation']) else result['rotation'],
+                        'translation': result['translation'].cpu().numpy() if torch.is_tensor(result['translation']) else result['translation'],
+                    }
+                    
+                    logger.info(f"\n[Pose Optimization] Initial pose:")
+                    logger.info(f"  scale: {initial_pose['scale']}")
+                    logger.info(f"  rotation (wxyz): {initial_pose['rotation']}")
+                    logger.info(f"  translation: {initial_pose['translation']}")
+                    
+                    # Initialize optimizer
+                    logger.info(f"\n[Pose Optimization] Initializing optimizer...")
+                    logger.info(f"  Iterations: {pose_opt_iterations}")
+                    logger.info(f"  Learning rate: {pose_opt_lr}")
+                    logger.info(f"  Device: {pose_opt_device}")
+                    
+                    optimizer = PoseOptimizer(
+                        canonical_mesh_path=str(glb_path),
+                        initial_pose=initial_pose,
+                        target_points=target_points,
+                        alignment_matrix=alignment_matrix,
+                        device=pose_opt_device,
+                        optimize_scale=pose_opt_optimize_scale,
+                    )
+                    
+                    # Run optimization
+                    logger.info(f"\n[Pose Optimization] Running optimization...")
+                    history = optimizer.optimize(
+                        num_iterations=pose_opt_iterations,
+                        lr=pose_opt_lr,
+                        early_stopping=True,
+                        patience=50,
+                    )
+                    
+                    # Get optimized pose
+                    final_pose = optimizer.get_optimized_pose()
+                    
+                    logger.info(f"\n[Pose Optimization] Optimization complete!")
+                    logger.info(f"  Final loss: {history['loss'][-1]:.6f}")
+                    logger.info(f"  Initial loss: {history['loss'][0]:.6f}")
+                    logger.info(f"  Improvement: {100 * (1 - history['loss'][-1] / history['loss'][0]):.2f}%")
+                    
+                    logger.info(f"\n[Pose Optimization] Optimized pose:")
+                    logger.info(f"  scale: {final_pose['scale']}")
+                    logger.info(f"  rotation (wxyz): {final_pose['rotation']}")
+                    logger.info(f"  translation: {final_pose['translation']}")
+                    
+                    # Save optimization results
+                    pose_opt_dir = output_dir / "pose_optimization"
+                    pose_opt_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Save optimized parameters
+                    opt_params = {
+                        'scale': final_pose['scale'],
+                        'rotation': final_pose['rotation'],
+                        'translation': final_pose['translation'],
+                        'loss_history': np.array(history['loss']),
+                        'cd_history': np.array(history['cd']),
+                        'scale_history': np.array(history['scale']),
+                        'initial_pose': {
+                            'scale': initial_pose['scale'],
+                            'rotation': initial_pose['rotation'],
+                            'translation': initial_pose['translation'],
+                        }
+                    }
+                    opt_params_path = pose_opt_dir / "optimized_params.npz"
+                    np.savez(opt_params_path, **opt_params)
+                    logger.info(f"\n✓ Optimized parameters saved to: {opt_params_path}")
+                    
+                    # Save optimized result as result_pose_optimized.glb (方案 A)
+                    logger.info(f"\n[Pose Optimization] Saving optimized GLB files...")
+                    
+                    try:
+                        import trimesh
+                        
+                        # IMPORTANT: result_pose_optimized.glb should be in CANONICAL space
+                        # merge_glb_with_da3_aligned will apply the pose transformation
+                        # So we just copy the canonical mesh (same as result.glb structure)
+                        canonical_scene = trimesh.load(str(glb_path))
+                        
+                        # Save canonical mesh as result_pose_optimized.glb
+                        # (The pose is stored in optimized_params.npz, and will be used by merge_glb_with_da3_aligned)
+                        optimized_glb_path = output_dir / "result_pose_optimized.glb"
+                        canonical_scene.export(str(optimized_glb_path))
+                        logger.info(f"✓ Optimized GLB (canonical) saved to: {optimized_glb_path}")
+                        logger.info(f"  Note: This GLB is in canonical space. The optimized pose is in optimized_params.npz")
+                        
+                        # Merge optimized result with DA3 scene
+                        # merge_glb_with_da3_aligned expects canonical GLB and will apply the pose
+                        optimized_sam3d_pose = {
+                            'scale': final_pose['scale'],
+                            'rotation': final_pose['rotation'],
+                            'translation': final_pose['translation'],
+                        }
+                        
+                        merged_optimized_path = merge_glb_with_da3_aligned(
+                            optimized_glb_path,  # Canonical GLB
+                            da3_dir,
+                            optimized_sam3d_pose,  # Optimized pose to apply
+                            output_path=output_dir / "result_merged_scene_optimized.glb"
+                        )
+                        
+                        if merged_optimized_path:
+                            logger.info(f"✓ Optimized merged GLB saved to: {merged_optimized_path}")
+                        
+                    except Exception as e:
+                        logger.error(f"[Pose Optimization] Failed to save optimized GLB: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    logger.info("\n" + "=" * 70)
+                    logger.info("[Pose Optimization] Complete!")
+                    logger.info("=" * 70)
+                    
+            except ImportError as e:
+                logger.error(f"[Pose Optimization] Failed to import pose optimization module: {e}")
+                logger.error("  Please make sure the pose_align module is properly installed")
+            except Exception as e:
+                logger.error(f"[Pose Optimization] Optimization failed: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    # Return result info for multi-object mode
+    # This allows run_multiobject_inference to collect results for merging
+    return_pose = None
+    return_glb = None
+    
+    # Check if we have optimized results
+    optimized_glb_path = output_dir / "result_pose_optimized.glb" if 'output_dir' in locals() else None
+    merged_optimized_path = output_dir / "result_merged_scene_optimized.glb" if 'output_dir' in locals() else None
+    
+    if run_pose_optimization and optimized_glb_path and optimized_glb_path.exists():
+        # Use optimized pose if available
+        # Read from saved optimized_params.npz
+        opt_params_path = output_dir / "pose_optimization" / "optimized_params.npz"
+        if opt_params_path.exists():
+            opt_data = np.load(opt_params_path)
+            return_pose = {
+                'scale': opt_data['scale'],
+                'rotation': opt_data['rotation'],
+                'translation': opt_data['translation'],
+            }
+            return_glb = optimized_glb_path
+    
+    # Fall back to initial pose from inference
+    if return_pose is None and 'result' in locals() and result is not None and 'glb_path' in locals():
+        return_pose = {
+            'scale': result['scale'].cpu().numpy() if torch.is_tensor(result['scale']) else result['scale'],
+            'rotation': result['rotation'].cpu().numpy() if torch.is_tensor(result['rotation']) else result['rotation'],
+            'translation': result['translation'].cpu().numpy() if torch.is_tensor(result['translation']) else result['translation'],
+        }
+        return_glb = glb_path
+    
+    if return_pose and return_glb and return_glb.exists():
+        result_dict = {
+            'glb_path': return_glb,
+            'pose': return_pose,
+            'output_dir': output_dir if 'output_dir' in locals() else None,
+        }
+        
+        # Add optimized paths if they exist
+        if optimized_glb_path and optimized_glb_path.exists():
+            result_dict['optimized_glb_path'] = optimized_glb_path
+        if merged_optimized_path and merged_optimized_path.exists():
+            result_dict['merged_optimized_path'] = merged_optimized_path
+        
+        return result_dict
+    
+    return None
 
 
 def main():
@@ -3078,6 +3952,23 @@ Examples:
     parser.add_argument("--self_occlusion_tolerance", type=float, default=4.0,
                         help="Tolerance for self-occlusion detection in voxel units (default: 4.0)")
     
+    # ========================================
+    # Pose Optimization Parameters
+    # ========================================
+    parser.add_argument("--run_pose_optimization", action="store_true",
+                        help="Run pose optimization after inference (requires --da3_output). "
+                             "Optimizes object scale, rotation, and translation by aligning with DA3 point cloud.")
+    parser.add_argument("--pose_opt_iterations", type=int, default=300,
+                        help="Pose optimization: number of iterations (default: 300)")
+    parser.add_argument("--pose_opt_lr", type=float, default=0.01,
+                        help="Pose optimization: learning rate (default: 0.01)")
+    parser.add_argument("--pose_opt_mask_erosion", type=int, default=3,
+                        help="Pose optimization: mask erosion kernel size (default: 3)")
+    parser.add_argument("--pose_opt_device", type=str, default="cuda",
+                        help="Pose optimization: device (cuda or cpu, default: cuda)")
+    parser.add_argument("--pose_opt_optimize_scale", action="store_true",
+                        help="Pose optimization: optimize scale (default: False, only optimize rotation and translation)")
+    
     args = parser.parse_args()
     
     input_path = Path(args.input_path)
@@ -3087,42 +3978,106 @@ Examples:
     image_names = parse_image_names(args.image_names)
     decode_formats = [fmt.strip() for fmt in args.decode_formats.split(",") if fmt.strip()]
     
+    # Parse mask_prompt: support comma-separated multiple objects
+    mask_prompts = []
+    if args.mask_prompt:
+        mask_prompts = [prompt.strip() for prompt in args.mask_prompt.split(",") if prompt.strip()]
+    
+    # Detect single-object or multi-object mode
+    is_multiobject = len(mask_prompts) > 1
+    
     try:
-        run_weighted_inference(
-            input_path=input_path,
-            mask_prompt=args.mask_prompt,
-            image_names=image_names,
-            seed=args.seed,
-            stage1_steps=args.stage1_steps,
-            stage2_steps=args.stage2_steps,
-            decode_formats=decode_formats,
-            model_tag=args.model_tag,
-            # Stage 1 (Shape) weighting
-            stage1_weighting=not args.no_stage1_weighting,
-            stage1_entropy_layer=args.stage1_entropy_layer,
-            stage1_entropy_alpha=args.stage1_entropy_alpha,
-            # Stage 2 (Texture) weighting
-            stage2_weighting=not args.no_stage2_weighting,
-            stage2_weight_source=args.stage2_weight_source,
-            stage2_entropy_alpha=args.stage2_entropy_alpha,
-            stage2_visibility_alpha=args.stage2_visibility_alpha,
-            stage2_attention_layer=args.stage2_attention_layer,
-            stage2_attention_step=args.stage2_attention_step,
-            stage2_min_weight=args.stage2_min_weight,
-            stage2_weight_combine_mode=args.stage2_weight_combine_mode,
-            stage2_visibility_weight_ratio=args.stage2_visibility_weight_ratio,
-            # Visualization
-            visualize_weights=args.visualize_weights,
-            save_attention=args.save_attention,
-            attention_layers_to_save=parse_attention_layers(args.attention_layers),
-            save_stage2_init=args.save_stage2_init,
-            # DA3 integration
-            da3_output_path=args.da3_output,
-            merge_da3_glb=args.merge_da3_glb,
-            overlay_pointmap=args.overlay_pointmap,
-            enable_latent_visibility=args.compute_latent_visibility,
-            self_occlusion_tolerance=args.self_occlusion_tolerance,
-        )
+        if is_multiobject:
+            # Multi-object mode
+            logger.info(f"Multi-object mode: {len(mask_prompts)} objects detected: {mask_prompts}")
+            run_multiobject_inference(
+                input_path=input_path,
+                mask_prompts=mask_prompts,
+                image_names=image_names,
+                seed=args.seed,
+                stage1_steps=args.stage1_steps,
+                stage2_steps=args.stage2_steps,
+                decode_formats=decode_formats,
+                model_tag=args.model_tag,
+                # Stage 1 (Shape) weighting
+                stage1_weighting=not args.no_stage1_weighting,
+                stage1_entropy_layer=args.stage1_entropy_layer,
+                stage1_entropy_alpha=args.stage1_entropy_alpha,
+                # Stage 2 (Texture) weighting
+                stage2_weighting=not args.no_stage2_weighting,
+                stage2_weight_source=args.stage2_weight_source,
+                stage2_entropy_alpha=args.stage2_entropy_alpha,
+                stage2_visibility_alpha=args.stage2_visibility_alpha,
+                stage2_attention_layer=args.stage2_attention_layer,
+                stage2_attention_step=args.stage2_attention_step,
+                stage2_min_weight=args.stage2_min_weight,
+                stage2_weight_combine_mode=args.stage2_weight_combine_mode,
+                stage2_visibility_weight_ratio=args.stage2_visibility_weight_ratio,
+                # Visualization
+                visualize_weights=args.visualize_weights,
+                save_attention=args.save_attention,
+                attention_layers_to_save=parse_attention_layers(args.attention_layers),
+                save_stage2_init=args.save_stage2_init,
+                # DA3 integration
+                da3_output_path=args.da3_output,
+                merge_da3_glb=args.merge_da3_glb,
+                overlay_pointmap=args.overlay_pointmap,
+                enable_latent_visibility=args.compute_latent_visibility,
+                self_occlusion_tolerance=args.self_occlusion_tolerance,
+                # Pose optimization
+                run_pose_optimization=args.run_pose_optimization,
+                pose_opt_iterations=args.pose_opt_iterations,
+                pose_opt_lr=args.pose_opt_lr,
+                pose_opt_mask_erosion=args.pose_opt_mask_erosion,
+                pose_opt_device=args.pose_opt_device,
+                pose_opt_optimize_scale=args.pose_opt_optimize_scale,
+            )
+        else:
+            # Single-object mode (original behavior)
+            single_mask_prompt = mask_prompts[0] if mask_prompts else None
+            logger.info(f"Single-object mode: {single_mask_prompt}")
+            run_weighted_inference(
+                input_path=input_path,
+                mask_prompt=single_mask_prompt,
+                image_names=image_names,
+                seed=args.seed,
+                stage1_steps=args.stage1_steps,
+                stage2_steps=args.stage2_steps,
+                decode_formats=decode_formats,
+                model_tag=args.model_tag,
+                # Stage 1 (Shape) weighting
+                stage1_weighting=not args.no_stage1_weighting,
+                stage1_entropy_layer=args.stage1_entropy_layer,
+                stage1_entropy_alpha=args.stage1_entropy_alpha,
+                # Stage 2 (Texture) weighting
+                stage2_weighting=not args.no_stage2_weighting,
+                stage2_weight_source=args.stage2_weight_source,
+                stage2_entropy_alpha=args.stage2_entropy_alpha,
+                stage2_visibility_alpha=args.stage2_visibility_alpha,
+                stage2_attention_layer=args.stage2_attention_layer,
+                stage2_attention_step=args.stage2_attention_step,
+                stage2_min_weight=args.stage2_min_weight,
+                stage2_weight_combine_mode=args.stage2_weight_combine_mode,
+                stage2_visibility_weight_ratio=args.stage2_visibility_weight_ratio,
+                # Visualization
+                visualize_weights=args.visualize_weights,
+                save_attention=args.save_attention,
+                attention_layers_to_save=parse_attention_layers(args.attention_layers),
+                save_stage2_init=args.save_stage2_init,
+                # DA3 integration
+                da3_output_path=args.da3_output,
+                merge_da3_glb=args.merge_da3_glb,
+                overlay_pointmap=args.overlay_pointmap,
+                enable_latent_visibility=args.compute_latent_visibility,
+                self_occlusion_tolerance=args.self_occlusion_tolerance,
+                # Pose optimization
+                run_pose_optimization=args.run_pose_optimization,
+                pose_opt_iterations=args.pose_opt_iterations,
+                pose_opt_lr=args.pose_opt_lr,
+                pose_opt_mask_erosion=args.pose_opt_mask_erosion,
+                pose_opt_device=args.pose_opt_device,
+                pose_opt_optimize_scale=args.pose_opt_optimize_scale,
+            )
     except Exception as e:
         logger.error(f"Inference failed: {e}")
         import traceback

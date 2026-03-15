@@ -45,7 +45,7 @@ def load_mask_from_rgba(path: Path) -> np.ndarray:
 def load_images_and_masks(
     images_and_masks_dir: Path,
     image_names: Optional[List[str]] = None,
-) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+) -> Tuple[List[np.ndarray], List[np.ndarray], List[str]]:
     """
     Load multi-view data from images_and_masks folder
     
@@ -65,6 +65,7 @@ def load_images_and_masks(
     Returns:
         images: List of images (numpy arrays)
         masks: List of masks (numpy arrays, bool format)
+        loaded_names: List of image names that were successfully loaded
     """
     if not images_and_masks_dir.exists():
         raise FileNotFoundError(f"Directory does not exist: {images_and_masks_dir}")
@@ -73,20 +74,17 @@ def load_images_and_masks(
         raise ValueError(f"Path is not a directory: {images_and_masks_dir}")
     
     if image_names is None:
-        # Collect all image files (both .png and .jpg)
         image_files = list(images_and_masks_dir.glob("*.png")) + list(images_and_masks_dir.glob("*.jpg"))
         image_files = [f for f in image_files if "_mask" not in f.name]
         
-        # Sort by filename with natural number ordering
-        # This ensures "9.png" comes after "8.jpg", not before "0.jpg"
+        # Sort with natural number ordering (consistent with DA3 script)
+        # This ensures "2.png" comes before "10.png" (numeric, not lexicographic)
         def natural_sort_key(path):
-            """Sort key that handles numeric filenames correctly."""
             stem = path.stem
-            # Try to extract leading number for sorting
             try:
-                return (0, int(stem), stem)  # Numeric names first, sorted numerically
+                return (0, int(stem), stem)
             except ValueError:
-                return (1, 0, stem)  # Non-numeric names after, sorted alphabetically
+                return (1, 0, stem)
         
         image_files = sorted(image_files, key=natural_sort_key)
         image_names = [f.stem for f in image_files]
@@ -94,6 +92,7 @@ def load_images_and_masks(
     
     images = []
     masks = []
+    loaded_names = []
     
     for image_name in image_names:
         image_candidates = [
@@ -132,6 +131,7 @@ def load_images_and_masks(
             
             images.append(image)
             masks.append(mask)
+            loaded_names.append(image_name)
             
             logger.info(f"Loaded '{image_name}': image={image.shape}, mask={mask.shape}")
             
@@ -143,14 +143,14 @@ def load_images_and_masks(
         raise ValueError(f"No valid images and masks found in {images_and_masks_dir}")
     
     logger.info(f"Successfully loaded {len(images)} images")
-    return images, masks
+    return images, masks, loaded_names
 
 
 def load_from_segmentation_structure(
     segmentation_base_dir: Path,
     prompt: Optional[str] = None,
     view_indices: Optional[List[int]] = None,
-) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+) -> Tuple[List[np.ndarray], List[np.ndarray], List[str]]:
     """
     Load data from complete segmentation structure (kept for backward compatibility)
     
@@ -203,7 +203,7 @@ def load_images_and_masks_from_path(
     input_path: Path,
     mask_prompt: Optional[str] = None,
     image_names: Optional[List[str]] = None,
-) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+) -> Tuple[List[np.ndarray], List[np.ndarray], List[str]]:
     """
     Load multi-view data from specified path (supports two data structures)
     
@@ -235,6 +235,7 @@ def load_images_and_masks_from_path(
     Returns:
         images: List of images
         masks: List of masks
+        loaded_names: List of image names that were successfully loaded
     """
     if not input_path.exists():
         raise FileNotFoundError(f"Input path does not exist: {input_path}")
@@ -258,18 +259,16 @@ def load_images_and_masks_from_path(
         logger.info(f"Loading masks from: {masks_dir}")
         
         if image_names is None:
-            # Collect all image files (both .png and .jpg)
             image_files = list(images_dir.glob("*.png")) + list(images_dir.glob("*.jpg"))
             
-            # Sort by filename with natural number ordering
-            # This ensures "9.png" comes after "8.jpg", and "2.jpg" comes before "10.jpg"
+            # Sort with natural number ordering (consistent with DA3 script)
+            # This ensures "2.png" comes before "10.png" (numeric, not lexicographic)
             def natural_sort_key(path):
-                """Sort key that handles numeric filenames correctly."""
                 stem = path.stem
                 try:
-                    return (0, int(stem), stem)  # Numeric names first, sorted numerically
+                    return (0, int(stem), stem)
                 except ValueError:
-                    return (1, 0, stem)  # Non-numeric names after, sorted alphabetically
+                    return (1, 0, stem)
             
             image_files = sorted(image_files, key=natural_sort_key)
             image_names = [f.stem for f in image_files]
@@ -277,6 +276,7 @@ def load_images_and_masks_from_path(
         
         images = []
         masks = []
+        loaded_names = []
         
         for image_name in image_names:
             image_candidates = [
@@ -317,6 +317,7 @@ def load_images_and_masks_from_path(
                 
                 images.append(image)
                 masks.append(mask)
+                loaded_names.append(image_name)
                 
                 logger.info(f"Loaded '{image_name}': image={image.shape}, mask={mask.shape}")
                 
@@ -328,5 +329,96 @@ def load_images_and_masks_from_path(
             raise ValueError(f"No valid images and masks found in {input_path}")
         
         logger.info(f"Successfully loaded {len(images)} images")
-        return images, masks
+        return images, masks, loaded_names
+
+
+def load_gso_images_and_masks(
+    input_path: Path,
+    image_names: Optional[List[str]] = None,
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """
+    Load GSO dataset images and masks from RGBA images.
+    
+    GSO dataset format:
+    - PNG files are RGBA format
+    - Mask is extracted from alpha channel (alpha > 0 = foreground)
+    - File naming: 000.png, 001.png, 002.png, etc. (3-digit zero-padded)
+    
+    Args:
+        input_path: Path to directory containing PNG files
+        image_names: List of image names (without extension), e.g., ["000", "001", "002"]
+                     if None then auto-detect all PNG files
+    
+    Returns:
+        images: List of RGB images (numpy arrays, shape HxWx3)
+        masks: List of binary masks (numpy arrays, shape HxW, bool format)
+    """
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input path does not exist: {input_path}")
+    
+    if not input_path.is_dir():
+        raise ValueError(f"Input path is not a directory: {input_path}")
+    
+    logger.info(f"Loading GSO dataset from: {input_path}")
+    
+    if image_names is None:
+        # Auto-detect all PNG files with natural number ordering
+        def natural_sort_key(path):
+            stem = path.stem
+            try:
+                return (0, int(stem), stem)
+            except ValueError:
+                return (1, 0, stem)
+        
+        image_files = sorted(input_path.glob("*.png"), key=natural_sort_key)
+        image_names = [f.stem for f in image_files]
+        logger.info(f"Auto-detected {len(image_names)} images: {image_names[:5]}..." if len(image_names) > 5 else f"Auto-detected {len(image_names)} images: {image_names}")
+    
+    images = []
+    masks = []
+    
+    for image_name in image_names:
+        image_path = input_path / f"{image_name}.png"
+        
+        if not image_path.exists():
+            logger.warning(f"Image file not found: {image_path}, skipping")
+            continue
+        
+        try:
+            # Load RGBA image
+            img = Image.open(image_path)
+            img_array = np.array(img)
+            
+            # Extract RGB image (first 3 channels)
+            if img_array.ndim == 3 and img_array.shape[2] >= 3:
+                rgb_image = img_array[:, :, :3].astype(np.uint8)
+            else:
+                logger.warning(f"Unexpected image shape for {image_path}: {img_array.shape}")
+                continue
+            
+            # Extract mask from alpha channel
+            if img.mode == 'RGBA' and img_array.ndim == 3 and img_array.shape[2] >= 4:
+                mask = img_array[:, :, 3] > 0  # alpha > 0 = foreground
+            elif img.mode == 'RGB':
+                logger.warning(f"Image {image_path} is RGB format, not RGBA. Using all pixels as mask.")
+                mask = np.ones((img_array.shape[0], img_array.shape[1]), dtype=bool)
+            else:
+                logger.warning(f"Unexpected image mode {img.mode} for {image_path}")
+                mask = np.ones((img_array.shape[0], img_array.shape[1]), dtype=bool)
+            
+            images.append(rgb_image)
+            masks.append(mask)
+            
+            logger.info(f"Loaded '{image_name}': image={rgb_image.shape}, mask={mask.shape}, "
+                       f"foreground_pixels={mask.sum()}/{mask.size} ({mask.sum()/mask.size*100:.1f}%)")
+            
+        except Exception as e:
+            logger.error(f"Failed to load '{image_name}': {e}")
+            continue
+    
+    if len(images) == 0:
+        raise ValueError(f"No valid images found in {input_path}")
+    
+    logger.info(f"Successfully loaded {len(images)} GSO images")
+    return images, masks
 

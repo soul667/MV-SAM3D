@@ -177,14 +177,14 @@ def run_inference(
     else:
         logger.info("Mask prompt: None (images and masks in same directory)")
     
-    view_images, view_masks = load_images_and_masks_from_path(
+    view_images, view_masks, loaded_image_names = load_images_and_masks_from_path(
         input_path=input_path,
         mask_prompt=mask_prompt,
         image_names=image_names,
     )
     
     num_views = len(view_images)
-    logger.info(f"Successfully loaded {num_views} views")
+    logger.info(f"Successfully loaded {num_views} views: {loaded_image_names}")
     
     is_single_view = num_views == 1
     output_dir = get_output_dir(input_path, mask_prompt, image_names, is_single_view)
