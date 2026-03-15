@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MV-SAM3D — Multi-View 3D Reconstruction</title>
+  <style>
+    /* ================================================================ */
+    /* Reset & Variables                                                 */
+    /* ================================================================ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2d3145;
+      --accent: #6c63ff;
+      --accent-hover: #7f78ff;
+      --text: #e4e4e7;
+      --muted: #9ca3af;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --radius: 10px;
+    }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ================================================================ */
+    /* Layout                                                            */
+    /* ================================================================ */
+    .header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    .header h1 { font-size: 1.3rem; font-weight: 700; }
+    .header .badge {
+      font-size: 0.7rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: #fff;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+    }
+
+    /* ================================================================ */
+    /* Tabs                                                              */
+    /* ================================================================ */
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .tab-btn {
+      padding: 0.55rem 1.2rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover { color: var(--text); border-color: var(--accent); }
+    .tab-btn.active {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* ================================================================ */
+    /* Cards                                                             */
+    /* ================================================================ */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .card h2 { font-size: 1.1rem; margin-bottom: 1rem; }
+
+    /* ================================================================ */
+    /* Form Controls                                                     */
+    /* ================================================================ */
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 0.3rem;
+    }
+    input[type="text"],
+    input[type="file"],
+    textarea {
+      width: 100%;
+      padding: 0.6rem 0.8rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+    }
+    input[type="file"] { padding: 0.4rem 0.6rem; }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.6rem 1.4rem;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ================================================================ */
+    /* Image Preview Grid                                                */
+    /* ================================================================ */
+    .preview-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .preview-grid img {
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: cover;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+
+    /* ================================================================ */
+    /* Status                                                            */
+    /* ================================================================ */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.75rem 1rem;
+      border-radius: var(--radius);
+      font-size: 0.85rem;
+      margin-bottom: 1rem;
+    }
+    .status-bar.info    { background: #1e293b; border: 1px solid #334155; }
+    .status-bar.success { background: #052e16; border: 1px solid #14532d; }
+    .status-bar.warning { background: #422006; border: 1px solid #713f12; }
+    .status-bar.error   { background: #450a0a; border: 1px solid #7f1d1d; }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+    .dot.green  { background: var(--success); }
+    .dot.yellow { background: var(--warning); }
+    .dot.red    { background: var(--danger); }
+    .dot.blue   { background: var(--accent); }
+
+    /* Spinner */
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ================================================================ */
+    /* Task List                                                         */
+    /* ================================================================ */
+    .task-list { list-style: none; }
+    .task-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.8rem 1rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 0.5rem;
+      font-size: 0.85rem;
+    }
+    .task-item .task-id { font-family: monospace; color: var(--muted); }
+    .task-item .task-status {
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .task-status.completed { background: #052e16; color: var(--success); }
+    .task-status.running   { background: #1e293b; color: var(--accent); }
+    .task-status.queued    { background: #422006; color: var(--warning); }
+    .task-status.failed    { background: #450a0a; color: var(--danger); }
+
+    /* ================================================================ */
+    /* Result Viewer                                                     */
+    /* ================================================================ */
+    .result-viewer {
+      min-height: 300px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    /* ================================================================ */
+    /* 3D Viewer                                                         */
+    /* ================================================================ */
+    .viewer-3d {
+      width: 100%;
+      height: 400px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: #000;
+    }
+
+    /* ================================================================ */
+    /* Responsive                                                        */
+    /* ================================================================ */
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+    @media (max-width: 768px) {
+      .two-col { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ================================================================ -->
+<!-- Header                                                            -->
+<!-- ================================================================ -->
+<div class="header">
+  <h1>🧊 MV-SAM3D</h1>
+  <span class="badge">v0.0.1</span>
+  <span style="flex:1"></span>
+  <span id="health-dot" class="dot red" title="Checking API…"></span>
+  <span id="health-text" style="font-size:0.8rem;color:var(--muted)">Connecting…</span>
+</div>
+
+<!-- ================================================================ -->
+<!-- Main Container                                                    -->
+<!-- ================================================================ -->
+<div class="container">
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="upload">Upload &amp; Reconstruct</button>
+    <button class="tab-btn" data-tab="tasks">Tasks</button>
+  </div>
+
+  <!-- ============================================================== -->
+  <!-- Tab 1: Upload & Reconstruct                                     -->
+  <!-- ============================================================== -->
+  <div class="tab-panel active" id="tab-upload">
+    <div class="two-col">
+
+      <!-- Left Column: Input -->
+      <div>
+        <!-- Mode toggle -->
+        <div class="card">
+          <h2>Input Mode</h2>
+          <div class="tabs" style="margin-bottom:0.5rem">
+            <button class="tab-btn active mode-btn" data-mode="masks">Images + Masks</button>
+            <button class="tab-btn mode-btn" data-mode="prompt">Images + Text Prompt</button>
+          </div>
+        </div>
+
+        <!-- Images -->
+        <div class="card">
+          <h2>Images</h2>
+          <label for="inp-images">Select multiple view images</label>
+          <input type="file" id="inp-images" accept="image/*" multiple />
+          <div id="preview-images" class="preview-grid"></div>
+        </div>
+
+        <!-- Masks (mode=masks) -->
+        <div class="card" id="card-masks">
+          <h2>Masks</h2>
+          <label for="inp-masks">Select corresponding mask images (same order as images)</label>
+          <input type="file" id="inp-masks" accept="image/*" multiple />
+          <div id="preview-masks" class="preview-grid"></div>
+        </div>
+
+        <!-- Text prompt (mode=prompt) -->
+        <div class="card" id="card-prompt" style="display:none">
+          <h2>Object Prompt</h2>
+          <label for="inp-prompt">Describe the object to segment (e.g. "stuffed toy", "keyboard")</label>
+          <input type="text" id="inp-prompt" placeholder="e.g. stuffed toy" />
+        </div>
+
+        <!-- Submit -->
+        <button class="btn btn-primary" id="btn-submit">🚀 Start Reconstruction</button>
+      </div>
+
+      <!-- Right Column: Result -->
+      <div>
+        <div class="card">
+          <h2>Status</h2>
+          <div id="status-area">
+            <div class="status-bar info">
+              <span class="dot blue"></span>
+              Ready — upload images to begin
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Result Preview</h2>
+          <div id="result-area" class="result-viewer">
+            No results yet
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================== -->
+  <!-- Tab 2: Tasks                                                    -->
+  <!-- ============================================================== -->
+  <div class="tab-panel" id="tab-tasks">
+    <div class="card">
+      <h2>Reconstruction Tasks</h2>
+      <button class="btn btn-primary" id="btn-refresh" style="margin-bottom:1rem">🔄 Refresh</button>
+      <ul class="task-list" id="task-list">
+        <li class="task-item" style="color:var(--muted)">No tasks yet</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+<!-- ================================================================ -->
+<!-- Scripts                                                           -->
+<!-- ================================================================ -->
+<script>
+const API = window.location.origin;
+
+// ---- Tabs ----
+document.querySelectorAll('.tabs .tab-btn[data-tab]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tabs .tab-btn[data-tab]').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'tasks') refreshTasks();
+  });
+});
+
+// ---- Mode toggle ----
+let currentMode = 'masks';
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentMode = btn.dataset.mode;
+    document.getElementById('card-masks').style.display = currentMode === 'masks' ? '' : 'none';
+    document.getElementById('card-prompt').style.display = currentMode === 'prompt' ? '' : 'none';
+  });
+});
+
+// ---- File previews ----
+function setupPreview(inputId, previewId) {
+  document.getElementById(inputId).addEventListener('change', (e) => {
+    const grid = document.getElementById(previewId);
+    grid.innerHTML = '';
+    Array.from(e.target.files).forEach(file => {
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(file);
+      img.alt = file.name;
+      img.title = file.name;
+      grid.appendChild(img);
+    });
+  });
+}
+setupPreview('inp-images', 'preview-images');
+setupPreview('inp-masks', 'preview-masks');
+
+// ---- Health check ----
+async function checkHealth() {
+  try {
+    const res = await fetch(API + '/api/health');
+    const data = await res.json();
+    const dot = document.getElementById('health-dot');
+    const txt = document.getElementById('health-text');
+    if (data.status === 'ok') {
+      dot.className = 'dot green';
+      txt.textContent = 'API Online' + (data.gpu_available ? ' (GPU)' : ' (CPU)');
+    }
+  } catch {
+    document.getElementById('health-dot').className = 'dot red';
+    document.getElementById('health-text').textContent = 'API Offline';
+  }
+}
+checkHealth();
+setInterval(checkHealth, 15000);
+
+// ---- Status helpers ----
+function setStatus(type, html) {
+  const dotClass = {info:'blue',success:'green',warning:'yellow',error:'red'}[type] || 'blue';
+  document.getElementById('status-area').innerHTML =
+    `<div class="status-bar ${type}"><span class="dot ${dotClass}"></span>${html}</div>`;
+}
+function setStatusSpinner(html) {
+  document.getElementById('status-area').innerHTML =
+    `<div class="status-bar info"><span class="spinner"></span>${html}</div>`;
+}
+
+// ---- Submit ----
+document.getElementById('btn-submit').addEventListener('click', async () => {
+  const imageFiles = document.getElementById('inp-images').files;
+  if (!imageFiles.length) { setStatus('warning', 'Please select at least one image'); return; }
+
+  const formData = new FormData();
+  Array.from(imageFiles).forEach(f => formData.append('images', f));
+
+  let endpoint;
+  if (currentMode === 'masks') {
+    const maskFiles = document.getElementById('inp-masks').files;
+    Array.from(maskFiles).forEach(f => formData.append('masks', f));
+    endpoint = '/api/reconstruct';
+  } else {
+    const prompt = document.getElementById('inp-prompt').value.trim();
+    if (!prompt) { setStatus('warning', 'Please enter an object prompt'); return; }
+    formData.append('object_prompt', prompt);
+    endpoint = '/api/segment-and-reconstruct';
+  }
+
+  document.getElementById('btn-submit').disabled = true;
+  setStatusSpinner('Uploading and starting reconstruction…');
+
+  try {
+    const res = await fetch(API + endpoint, { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) { setStatus('error', data.detail || 'Upload failed'); return; }
+    setStatus('success', `Task created: <code>${data.task_id}</code> — ${data.message}`);
+    pollTask(data.task_id);
+  } catch (err) {
+    setStatus('error', 'Network error: ' + err.message);
+  } finally {
+    document.getElementById('btn-submit').disabled = false;
+  }
+});
+
+// ---- Poll task ----
+async function pollTask(taskId) {
+  const poll = async () => {
+    try {
+      const res = await fetch(API + `/api/tasks/${taskId}`);
+      const data = await res.json();
+      if (data.status === 'completed') {
+        setStatus('success', data.message);
+        showResult(data);
+        return;
+      }
+      if (data.status === 'failed') {
+        setStatus('error', 'Failed: ' + data.message);
+        return;
+      }
+      setStatusSpinner(`Status: ${data.status} — ${data.message}`);
+      setTimeout(poll, 2000);
+    } catch {
+      setTimeout(poll, 3000);
+    }
+  };
+  poll();
+}
+
+// ---- Show result ----
+function showResult(task) {
+  const area = document.getElementById('result-area');
+  let html = '<div style="padding:1rem;width:100%">';
+  html += `<p style="margin-bottom:0.5rem;color:var(--success)">✅ ${task.message}</p>`;
+  if (task.result_url) {
+    html += `<p style="font-size:0.85rem;color:var(--muted)">Result directory: <a href="${task.result_url}" style="color:var(--accent)">${task.result_url}</a></p>`;
+  }
+  html += '</div>';
+  area.innerHTML = html;
+  area.style.border = '2px solid var(--success)';
+}
+
+// ---- Tasks list ----
+async function refreshTasks() {
+  try {
+    const res = await fetch(API + '/api/tasks');
+    const data = await res.json();
+    const list = document.getElementById('task-list');
+    const entries = Object.entries(data);
+    if (!entries.length) {
+      list.innerHTML = '<li class="task-item" style="color:var(--muted)">No tasks yet</li>';
+      return;
+    }
+    list.innerHTML = entries.map(([id, t]) => `
+      <li class="task-item">
+        <span class="task-id">${id.substring(0,8)}…</span>
+        <span>${t.message || ''}</span>
+        <span class="task-status ${t.status}">${t.status}</span>
+      </li>
+    `).join('');
+  } catch {
+    document.getElementById('task-list').innerHTML =
+      '<li class="task-item" style="color:var(--danger)">Failed to load tasks</li>';
+  }
+}
+document.getElementById('btn-refresh').addEventListener('click', refreshTasks);
+</script>
+</body>
+</html>
