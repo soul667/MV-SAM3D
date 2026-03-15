@@ -515,7 +515,7 @@ async function refreshTasks() {
     }
     list.innerHTML = entries.map(([id, t]) => `
       <li class="task-item">
-        <span class="task-id">${id.substring(0,8)}…</span>
+        <span class="task-id">${id.substring(0,8)}&hellip;</span>
         <span>${t.message || ''}</span>
         <span class="task-status ${t.status}">${t.status}</span>
       </li>

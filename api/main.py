@@ -7,6 +7,7 @@ Provides REST API endpoints for multi-view 3D reconstruction:
 - Query task status and download results
 """
 
+import io
 import os
 import uuid
 import asyncio
@@ -147,7 +148,7 @@ async def _segment_with_grounded_sam2(
                 )
             if resp.status_code == 200:
                 mask_img = Image.open(
-                    __import__("io").BytesIO(resp.content)
+                    io.BytesIO(resp.content)
                 )
                 return np.array(mask_img) > 0
     except Exception:
@@ -201,7 +202,9 @@ async def _run_reconstruction(task_id: str, task_dir: Path, mode: str):
             images = [_load_image_array(p) for p in image_paths]
             masks = [_load_mask_array(p) for p in mask_paths] if mask_paths else [None] * len(images)
 
-            # Run inference on first view as demo (full multi-view requires DA3)
+            # NOTE: Currently runs single-view reconstruction on the first image.
+            # Full multi-view weighted fusion requires Depth Anything 3 (DA3) pointmaps
+            # and should be invoked via run_inference_weighted.py for production use.
             result = pipeline(images[0], masks[0] if masks else None)
 
             # Save result GLB if available
